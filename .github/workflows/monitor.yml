@@ -1,0 +1,79 @@
+name: Mama's Fish House monitor
+
+on:
+  schedule:
+    # GitHub starts a run roughly every 10 min (it can be late at busy times).
+    # Each run then checks every ~2 min for ~9 min, so coverage is near-continuous.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        default: check
+        options:
+          - check          # one normal check
+          - test-notify    # send a test push to your phone
+          - test-date      # live check of another date to prove detection end to end
+      test_date:
+        description: "Date for test-date mode (YYYY-MM-DD), pick one that has openings"
+        required: false
+        default: "2027-03-02"
+
+permissions:
+  contents: write   # to save state.json back to the repo
+
+concurrency:
+  group: mamas-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      PARTY_SIZE: "2"
+      START_DATE: "2026-11-22"
+      END_DATE: "2026-11-25"
+      # Optional time window (Hawaii time, 24h). Leave empty for any time.
+      EARLIEST_TIME: ""
+      LATEST_TIME: ""
+      YOUR_TZ: "America/Chicago"
+      HEARTBEAT_HOUR: "9"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test push
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'test-notify'
+        run: python monitor.py --test-notify
+
+      - name: Test detection on another date
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'test-date'
+        run: python monitor.py --test-date "${{ inputs.test_date }}"
+
+      - name: Single check (manual)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'check'
+        run: python monitor.py
+
+      - name: Check every ~2 min for ~9 min (scheduled)
+        if: github.event_name == 'schedule'
+        run: python monitor.py --loop-minutes 9 --interval 120
+
+      - name: Save state
+        if: always() && (github.event_name == 'schedule' || inputs.mode == 'check')
+        run: |
+          if [ -n "$(git status --porcelain -- state.json)" ]; then
+            git config user.name  "mamas-monitor-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "Update monitor state [skip ci]"
+            git pull --rebase -X theirs || true
+            git push
+          else
+            echo "State unchanged."
+          fi
